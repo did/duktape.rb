@@ -40,6 +40,7 @@ struct state {
   duk_context *ctx;
   VALUE complex_object;
   int was_complex;
+  VALUE blocks;
 };
 
 static void ctx_dealloc(void *ptr)
@@ -52,6 +53,7 @@ static void ctx_dealloc(void *ptr)
 static void ctx_mark(struct state *state)
 {
   rb_gc_mark(state->complex_object);
+  rb_gc_mark(state->blocks);
 }
 
 static VALUE ctx_alloc(VALUE klass)
@@ -67,6 +69,7 @@ static VALUE ctx_alloc(VALUE klass)
   struct state *state = malloc(sizeof(struct state));
   state->ctx = ctx;
   state->complex_object = oComplexObject;
+  state->blocks = rb_ary_new();
   return Data_Wrap_Struct(klass, ctx_mark, ctx_dealloc, state);
 }
 
@@ -536,20 +539,22 @@ static VALUE ctx_call_prop(int argc, VALUE* argv, VALUE self)
 
 static duk_ret_t ctx_call_pushed_function(duk_context *ctx) {
   VALUE block; // the block to yield
+  struct state *state;
+  int nargs = duk_get_top(ctx); // number of arguments of the block (arity)
   VALUE args = rb_ary_new(); // the block to yield needs an array of arguments
   VALUE result; // the result returned by yielding the block
-  int nargs = duk_get_top(ctx); // number of arguments of the block (arity)
-  struct state *state;
+
+  duk_push_current_function(ctx);
 
   // get the block which is a property of the pushed function
-  duk_push_current_function(ctx);
   duk_get_prop_string(ctx, -1, "block");
   block = (VALUE) duk_get_pointer(ctx, -1);
   duk_pop(ctx);
 
-  // ctx_stack_to_value needs a state instead of a context
-  state = malloc(sizeof(struct state));
-  state->ctx = ctx;
+  // get the state so that we don't need to a create a new one
+  duk_get_prop_string(ctx, -1, "state");
+  state = (struct state *) duk_get_pointer(ctx, -1);
+  duk_pop(ctx);
 
   // before pushing each argument to the array, each one needs to be converted into a ruby value
   for (int i = 0; i < nargs; i++)
@@ -572,6 +577,7 @@ static duk_ret_t ctx_call_pushed_function(duk_context *ctx) {
  */
 static VALUE ctx_define_function(VALUE self, VALUE prop)
 {
+  VALUE block;
   struct state *state;
   duk_context *ctx;
 
@@ -588,9 +594,16 @@ static VALUE ctx_define_function(VALUE self, VALUE prop)
 
   duk_push_c_function(ctx, ctx_call_pushed_function, DUK_VARARGS);
 
-  // attach the block to the function previously pushed. Name of the property is block.
+  block = rb_block_proc();
+  rb_ary_push(state->blocks, block); // block will be properly garbage collected
+
+  // both block and state are required by the pushed function
   duk_push_string(ctx, "block");
-  duk_push_pointer(ctx, (void *) rb_block_proc());
+  duk_push_pointer(ctx, (void *) block);
+  duk_def_prop(ctx, -3,  DUK_DEFPROP_HAVE_VALUE | DUK_DEFPROP_HAVE_WRITABLE | 0);
+
+  duk_push_string(ctx, "state");
+  duk_push_pointer(ctx, (void *) state);
   duk_def_prop(ctx, -3,  DUK_DEFPROP_HAVE_VALUE | DUK_DEFPROP_HAVE_WRITABLE | 0);
 
   duk_put_prop_string(ctx, -2, StringValueCStr(prop));
